@@ -160,7 +160,7 @@ public class JdbmIndex<K> extends AbstractIndex<K, String>
         LOG.info( "Setting CacheRecondManager's cache size to {}", recCacheSize );
         
         this.recMan = recMan;
-        initTables();
+        initTables( schemaManager );
         // try
         // {
         //     initTables( schemaManager );

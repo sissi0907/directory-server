@@ -16,3 +16,9 @@ jobs:
           
       - name: maven clean install 
         run: mvn clean install
+        
+      - name: Compile Module
+        run: mvn test-compile -am
+  
+      - name: Run Flaky Test
+        run: mvn test -Dtest=org.apache.directory.server.core.partition.impl.btree.jdbm.JdbmIndex#init

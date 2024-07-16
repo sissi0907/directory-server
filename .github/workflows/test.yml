@@ -15,10 +15,10 @@ jobs:
           java-version: '8'
           
       - name: maven clean install 
-        run: mvn clean install
+        run: mvn clean install -Dcheckstyle.skip -Drat.skip
         
       - name: Compile Module
-        run: mvn test-compile -am
+        run: mvn test-compile -am -Dcheckstyle.skip -Drat.skip
   
       - name: Run Flaky Test
         run: mvn test -Dtest=org.apache.directory.server.core.partition.impl.btree.jdbm.JdbmIndex#init

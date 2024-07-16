@@ -6,91 +6,96 @@
  *  to you under the Apache License, Version 2.0 (the
  *  "License"); you may not use this file except in compliance
  *  with the License.  You may obtain a copy of the License at
- * 
+ *  
  *    http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *  
  *  Unless required by applicable law or agreed to in writing,
  *  software distributed under the License is distributed on an
  *  "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  *  KIND, either express or implied.  See the License for the
  *  specific language governing permissions and limitations
- *  under the License.
- * 
+ *  under the License. 
+ *  
  */
 package org.apache.directory.server.core.partition.impl.btree.jdbm;
 
 
+import jdbm.RecordManager;
+import jdbm.helper.MRU;
+import jdbm.recman.BaseRecordManager;
+import jdbm.recman.CacheRecordManager;
+import org.apache.directory.server.core.partition.impl.btree.*;
+import org.apache.directory.server.core.cursor.Cursor;
+import org.apache.directory.server.schema.SerializableComparator;
+import org.apache.directory.server.xdbm.Index;
+import org.apache.directory.server.xdbm.Tuple;
+import org.apache.directory.server.xdbm.IndexCursor;
+import org.apache.directory.shared.ldap.schema.AttributeType;
+import org.apache.directory.shared.ldap.util.SynchronizedLRUMap;
+
+import javax.naming.NamingException;
 import java.io.File;
 import java.io.IOException;
-import java.net.URI;
-
-import jdbm.RecordManager;
-import jdbm.helper.ByteArraySerializer;
-
-import org.apache.directory.api.ldap.model.cursor.Cursor;
-import org.apache.directory.api.ldap.model.cursor.CursorException;
-import org.apache.directory.api.ldap.model.cursor.EmptyCursor;
-import org.apache.directory.api.ldap.model.cursor.Tuple;
-import org.apache.directory.api.ldap.model.exception.LdapException;
-import org.apache.directory.api.ldap.model.exception.LdapOtherException;
-import org.apache.directory.api.ldap.model.schema.AttributeType;
-import org.apache.directory.api.ldap.model.schema.MatchingRule;
-import org.apache.directory.api.ldap.model.schema.SchemaManager;
-import org.apache.directory.api.ldap.model.schema.comparators.SerializableComparator;
-import org.apache.directory.api.ldap.model.schema.comparators.UuidComparator;
-import org.apache.directory.server.core.api.partition.PartitionTxn;
-import org.apache.directory.server.core.partition.impl.btree.IndexCursorAdaptor;
-import org.apache.directory.server.i18n.I18n;
-import org.apache.directory.server.xdbm.AbstractIndex;
-import org.apache.directory.server.xdbm.IndexEntry;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 
-/**
- * A Jdbm based index implementation. It creates an Index for a give AttributeType.
+/** 
+ * A Jdbm based index implementation.
  *
+ * @org.apache.xbean.XBean
+ * 
  * @author <a href="mailto:dev@directory.apache.org">Apache Directory Project</a>
+ * @version $Rev$
  */
-public class JdbmIndex<K> extends AbstractIndex<K, String>
+public class JdbmIndex<K,O> implements Index<K,O>
 {
-    /** A logger for this class */
-    private static final Logger LOG = LoggerFactory.getLogger( JdbmIndex.class );
-
-    /** default duplicate limit before duplicate keys switch to using a btree for values */
+    /**
+     * default duplicate limit before duplicate keys switch to using a btree for values
+     */
     public static final int DEFAULT_DUPLICATE_LIMIT = 512;
 
     /**  the key used for the forward btree name */
     public static final String FORWARD_BTREE = "_forward";
-
     /**  the key used for the reverse btree name */
     public static final String REVERSE_BTREE = "_reverse";
 
+    /** the attribute type resolved for this JdbmIndex */
+    private AttributeType attribute;
     /**
      * the forward btree where the btree key is the value of the indexed attribute and
      * the value of the btree is the entry id of the entry containing an attribute with
      * that value
      */
-    protected JdbmTable<K, String> forward;
-
+    protected JdbmTable<K, Long> forward;
     /**
      * the reverse btree where the btree key is the entry id of the entry containing a
      * value for the indexed attribute, and the btree value is the value of the indexed
      * attribute
      */
-    protected JdbmTable<String, K> reverse;
-
+    protected JdbmTable<Long,K> reverse;
     /**
      * the JDBM record manager for the file containing this index
      */
     protected RecordManager recMan;
-
+    /**
+     * the normalized value cache for this index
+     * @todo I don't think the keyCache is required anymore since the normalizer
+     * will cache values for us.
+     */
+    protected SynchronizedLRUMap keyCache;
+    /** the size (number of index entries) for the cache */
+    protected int cacheSize = DEFAULT_INDEX_CACHE_SIZE;
     /**
      * duplicate limit before duplicate keys switch to using a btree for values
      */
     protected int numDupLimit = DEFAULT_DUPLICATE_LIMIT;
-
-    /** a custom working directory path when specified in configuration */
+    /**
+     * the attribute identifier set at configuration time for this index which may not
+     * be the OID but an alias name for the attributeType associated with this Index
+     */
+    private String attributeId;
+    /** whether or not this index has been initialized */
+    protected boolean initialized;
+    /** a customm working directory path when specified in configuration */
     protected File wkDirPath;
 
 
@@ -115,134 +120,165 @@ public class JdbmIndex<K> extends AbstractIndex<K, String>
     // ------------------------------------------------------------------------
     // C O N S T R U C T O R S
     // ----------------------------------------------------------------------
-    /**
-     * Creates a JdbmIndex instance for a give AttributeId
-     * 
-     * @param attributeId The Attribute ID
-     * @param withReverse If we have to create a reverse index
-     */
-    public JdbmIndex( String attributeId, boolean withReverse )
-    {
-        super( attributeId, withReverse );
 
+    public JdbmIndex()
+    {
         initialized = false;
     }
 
 
-    /**
-     * Initialize the index for an Attribute, with a specific working directory (may be null).
-     * 
-     * @param recMan The RecordManager
-     * @param schemaManager The schemaManager to use to get back the Attribute
-     * @param attributeType The attributeType this index is created for
-     * @throws LdapException If the initialization failed
-     * @throws IOException If the initialization failed
-     */
-    public void init( RecordManager recMan, SchemaManager schemaManager, AttributeType attributeType ) 
-            throws LdapException, IOException
+    public JdbmIndex( String attributeId )
     {
-        LOG.debug( "Initializing an Index for attribute '{}'", attributeType.getName() );
-
-        this.attributeType = attributeType;
-
-        if ( attributeId == null )
-        {
-            setAttributeId( attributeType.getName() );
-        }
-
-        // see DIRSERVER-2002
-        // prevent the OOM when more than 50k users are loaded at a stretch
-        // adding this system property to make it configurable till JDBM gets replaced by Mavibot
-        String cacheSizeVal = System.getProperty( "jdbm.recman.cache.size", "100" );
-        
-        int recCacheSize = Integer.parseInt( cacheSizeVal );
-        
-        LOG.info( "Setting CacheRecondManager's cache size to {}", recCacheSize );
-        
-        this.recMan = recMan;
-
-        try
-        {
-            initTables( schemaManager );
-        }
-        catch ( IOException e )
-        {
-            // clean up
-            close( null );
-            throw e;
-        }
-
-        initialized = true;
+        initialized = false;
+        setAttributeId( attributeId );
     }
 
 
+    public void init( AttributeType attributeType, File wkDirPath ) throws IOException
+    {
+        this.keyCache = new SynchronizedLRUMap( cacheSize );
+        this.attribute = attributeType;
+
+        if ( attributeId == null )
+        {
+            setAttributeId( attribute.getName() );
+        }
+
+        if ( this.wkDirPath == null )
+        {
+            this.wkDirPath = wkDirPath;
+        }
+
+        File file = new File( this.wkDirPath.getPath() + File.separator + attribute.getName() );
+        String path = file.getAbsolutePath();
+        BaseRecordManager base = new BaseRecordManager( path );
+        base.disableTransactions();
+        this.recMan = new CacheRecordManager( base, new MRU( cacheSize ) );
+
+        initTables();
+        initialized = true;
+    }
+
+    
     /**
      * Initializes the forward and reverse tables used by this Index.
      * 
-     * @param schemaManager The server schemaManager
      * @throws IOException if we cannot initialize the forward and reverse
      * tables
      */
-    private void initTables( SchemaManager schemaManager ) throws IOException
+    private void initTables() throws IOException
     {
         SerializableComparator<K> comp;
 
-        MatchingRule mr = attributeType.getEquality();
-
-        if ( mr == null )
+        try
         {
-            throw new IOException( I18n.err( I18n.ERR_574, attributeType.getName() ) );
+            comp = new SerializableComparator<K>( attribute.getEquality().getOid() );
+        }
+        catch ( NamingException e )
+        {
+            IOException ioe = new IOException( "Failed to find an equality matching rule for attribute type" );
+            ioe.initCause( e );
+            throw ioe;
         }
 
-        comp = new SerializableComparator<>( mr.getOid() );
-
         /*
-         * The forward key/value map stores attribute values to master table
+         * The forward key/value map stores attribute values to master table 
          * primary keys.  A value for an attribute can occur several times in
          * different entries so the forward map can have more than one value.
          */
-        UuidComparator.INSTANCE.setSchemaManager( schemaManager );
-        comp.setSchemaManager( schemaManager );
-
-        if ( mr.getSyntax().isHumanReadable() )
-        {
-            forward = new JdbmTable<>( schemaManager, attributeType.getOid() + FORWARD_BTREE, numDupLimit,
-                recMan,
-                comp, UuidComparator.INSTANCE, StringSerializer.INSTANCE, UuidSerializer.INSTANCE );
-        }
-        else
-        {
-            forward = new JdbmTable<>( schemaManager, attributeType.getOid() + FORWARD_BTREE, numDupLimit,
-                recMan,
-                comp, UuidComparator.INSTANCE, new ByteArraySerializer(), UuidSerializer.INSTANCE );
-        }
+        forward = new JdbmTable<K, Long>(
+            attribute.getName() + FORWARD_BTREE, 
+            numDupLimit,
+            recMan, 
+            comp, LongComparator.INSTANCE,
+            null, LongSerializer.INSTANCE );
 
         /*
          * Now the reverse map stores the primary key into the master table as
          * the key and the values of attributes as the value.  If an attribute
-         * is single valued according to its specification based on a schema
+         * is single valued according to its specification based on a schema 
          * then duplicate keys should not be allowed within the reverse table.
          */
-        if ( withReverse )
+        if ( attribute.isSingleValue() )
         {
-            if ( attributeType.isSingleValued() )
-            {
-                reverse = new JdbmTable<>( schemaManager, attributeType.getOid() + REVERSE_BTREE, recMan,
-                    UuidComparator.INSTANCE, UuidSerializer.INSTANCE, null );
-            }
-            else
-            {
-                reverse = new JdbmTable<>( schemaManager, attributeType.getOid() + REVERSE_BTREE, numDupLimit,
-                    recMan,
-                    UuidComparator.INSTANCE, comp, UuidSerializer.INSTANCE, null );
-            }
+            reverse = new JdbmTable<Long,K>(
+                attribute.getName() + REVERSE_BTREE,
+                recMan,
+                LongComparator.INSTANCE,
+                LongSerializer.INSTANCE,
+                null );
         }
+        else
+        {
+            reverse = new JdbmTable<Long,K>(
+                attribute.getName() + REVERSE_BTREE,
+                numDupLimit,
+                recMan,
+                LongComparator.INSTANCE, comp,
+                LongSerializer.INSTANCE, null );
+        }
+    }
+
+
+    /**
+     * @see org.apache.directory.server.xdbm.Index#getAttribute()
+     */
+    public AttributeType getAttribute()
+    {
+        return attribute;
     }
 
 
     // ------------------------------------------------------------------------
     // C O N F I G U R A T I O N   M E T H O D S
     // ------------------------------------------------------------------------
+
+    /**
+     * Protects configuration properties from being set after initialization.
+     *
+     * @param property the property to protect
+     */
+    private void protect( String property )
+    {
+        if ( initialized )
+        {
+            throw new IllegalStateException( "The " + property
+                + " property for an index cannot be set after it has been initialized." );
+        }
+    }
+
+
+    public boolean isCountExact()
+    {
+        return false;
+    }
+    
+
+    /**
+     * Gets the attribute identifier set at configuration time for this index which may not
+     * be the OID but an alias name for the attributeType associated with this Index
+     *
+     * @return configured attribute oid or alias name
+     */
+    public String getAttributeId()
+    {
+        return attributeId;
+    }
+
+
+    /**
+     * Sets the attribute identifier set at configuration time for this index which may not
+     * be the OID but an alias name for the attributeType associated with this Index
+     *
+     * @param attributeId configured attribute oid or alias name
+     */
+    public void setAttributeId( String attributeId )
+    {
+        protect( "attributeId" );
+        this.attributeId = attributeId;
+    }
+
+
     /**
      * Gets the threshold at which point duplicate keys use btree indirection to store
      * their values.
@@ -269,15 +305,38 @@ public class JdbmIndex<K> extends AbstractIndex<K, String>
 
 
     /**
+     * Gets the size of the index cache in terms of the number of index entries to be cached.
+     *
+     * @return the size of the index cache
+     */
+    public int getCacheSize()
+    {
+        return cacheSize;
+    }
+
+
+    /**
+     * Sets the size of the index cache in terms of the number of index entries to be cached.
+     *
+     * @param cacheSize the size of the index cache
+     */
+    public void setCacheSize( int cacheSize )
+    {
+        protect( "cacheSize" );
+        this.cacheSize = cacheSize;
+    }
+
+
+    /**
      * Sets the working directory path to something other than the default. Sometimes more
      * performance is gained by locating indices on separate disk spindles.
      *
      * @param wkDirPath optional working directory path
      */
-    public void setWkDirPath( URI wkDirPath )
+    public void setWkDirPath( File wkDirPath )
     {
         protect( "wkDirPath" );
-        this.wkDirPath = new File( wkDirPath );
+        this.wkDirPath = wkDirPath;
     }
 
 
@@ -285,52 +344,49 @@ public class JdbmIndex<K> extends AbstractIndex<K, String>
      * Gets the working directory path to something other than the default. Sometimes more
      * performance is gained by locating indices on separate disk spindles.
      *
-     * @return optional working directory path
+     * @return optional working directory path 
      */
-    public URI getWkDirPath()
+    public File getWkDirPath()
     {
-        return wkDirPath != null ? wkDirPath.toURI() : null;
+        return wkDirPath;
     }
 
 
     // ------------------------------------------------------------------------
     // Scan Count Methods
     // ------------------------------------------------------------------------
+
+
     /**
-     * {@inheritDoc}
+     * @see org.apache.directory.server.xdbm.Index#count()
      */
-    public long count( PartitionTxn partitionTxn ) throws LdapException
+    public int count() throws IOException
     {
-        return forward.count( partitionTxn );
+        return forward.count();
     }
 
 
     /**
-     * {@inheritDoc}
+     * @see Index#count(java.lang.Object)
      */
-    public long count( PartitionTxn partitionTxn, K attrVal ) throws LdapException
+    public int count( K attrVal ) throws Exception
     {
-        return forward.count( partitionTxn, attrVal );
+        return forward.count( getNormalized( attrVal ) );
     }
 
 
-    /**
-     * {@inheritDoc}
-     */
-    @Override
-    public long greaterThanCount( PartitionTxn partitionTxn, K attrVal ) throws LdapException
+    public int greaterThanCount( K attrVal ) throws Exception
     {
-        return forward.greaterThanCount( partitionTxn, attrVal );
+        return forward.greaterThanCount( getNormalized( attrVal ) );
     }
-
-
+    
+    
     /**
-     * {@inheritDoc}
+     * @see org.apache.directory.server.xdbm.Index#lessThanCount(java.lang.Object)
      */
-    @Override
-    public long lessThanCount( PartitionTxn partitionTxn, K attrVal ) throws LdapException
+    public int lessThanCount( K attrVal ) throws Exception
     {
-        return forward.lessThanCount( partitionTxn, attrVal );
+        return forward.lessThanCount( getNormalized( attrVal ) );
     }
 
 
@@ -338,28 +394,22 @@ public class JdbmIndex<K> extends AbstractIndex<K, String>
     // Forward and Reverse Lookups
     // ------------------------------------------------------------------------
 
+
     /**
-     * {@inheritDoc}
+     * @see Index#forwardLookup(java.lang.Object)
      */
-    public String forwardLookup( PartitionTxn partitionTxn, K attrVal ) throws LdapException
+    public Long forwardLookup( K attrVal ) throws Exception
     {
-        return forward.get( partitionTxn, attrVal );
+        return forward.get( getNormalized( attrVal ) );
     }
 
 
     /**
-     * {@inheritDoc}
+     * @see org.apache.directory.server.xdbm.Index#reverseLookup(Long)
      */
-    public K reverseLookup( PartitionTxn partitionTxn, String id ) throws LdapException
+    public K reverseLookup( Long id ) throws Exception
     {
-        if ( withReverse )
-        {
-            return reverse.get( partitionTxn, id );
-        }
-        else
-        {
-            return null;
-        }
+        return reverse.get( id );
     }
 
 
@@ -367,208 +417,262 @@ public class JdbmIndex<K> extends AbstractIndex<K, String>
     // Add/Drop Methods
     // ------------------------------------------------------------------------
 
-    /**
-     * {@inheritDoc}
-     */
-    public synchronized void add( PartitionTxn partitionTxn,  K attrVal, String id ) throws LdapException
-    {
-        // The pair to be added must exists
-        forward.put( partitionTxn, attrVal, id );
 
-        if ( withReverse )
-        {
-            reverse.put( partitionTxn, id, attrVal );
-        }
+    /**
+     * @see Index#add(Object, Long)
+     */
+    public synchronized void add( K attrVal, Long id ) throws Exception
+    {
+        forward.put( getNormalized( attrVal ), id );
+        reverse.put( id, getNormalized( attrVal ) );
     }
 
 
     /**
-     * {@inheritDoc}
+     * @see Index#drop(Object,Long)
      */
-    public synchronized void drop( PartitionTxn partitionTxn, K attrVal, String id ) throws LdapException
+    public synchronized void drop( K attrVal, Long id ) throws Exception
     {
-        // The pair to be removed must exists
-        if ( forward.has( partitionTxn, attrVal, id ) )
-        {
-            forward.remove( partitionTxn, attrVal, id );
-
-            if ( withReverse )
-            {
-                reverse.remove( partitionTxn, id, attrVal );
-            }
-        }
+        forward.remove( getNormalized( attrVal ), id );
+        reverse.remove( id, getNormalized( attrVal ) );
     }
 
 
     /**
-     * {@inheritDoc}
+     * @see Index#drop(Long)
      */
-    public void drop( PartitionTxn partitionTxn, String entryId ) throws LdapException
+    public void drop( Long id ) throws Exception
     {
-        if ( withReverse )
+        Cursor<Tuple<Long,K>> values = reverse.cursor();
+        Tuple<Long,K> tuple = new Tuple<Long,K>( id, null );
+        values.before( tuple );
+
+        while ( values.next() )
         {
-            if ( isDupsEnabled() )
-            {
-                // Build a cursor to iterate on all the keys referencing
-                // this entryId
-                Cursor<Tuple<String, K>> values = reverse.cursor( partitionTxn, entryId );
-
-                try
-                {
-                    while ( values.next() )
-                    {
-                        // Remove the Key -> entryId from the index
-                        forward.remove( partitionTxn, values.get().getValue(), entryId );
-                    }
-    
-                    values.close();
-                }
-                catch ( CursorException | IOException e )
-                {
-                    throw new LdapOtherException( e.getMessage(), e );
-                }
-            }
-            else
-            {
-                K key = reverse.get( partitionTxn, entryId );
-
-                forward.remove( partitionTxn, key );
-            }
-
-            // Remove the id -> key from the reverse index
-            reverse.remove( partitionTxn, entryId );
+            forward.remove( values.get().getValue(), id );
         }
+
+        reverse.remove( id );
     }
 
 
     // ------------------------------------------------------------------------
     // Index Cursor Operations
     // ------------------------------------------------------------------------
+
+
     @SuppressWarnings("unchecked")
-    public Cursor<IndexEntry<K, String>> forwardCursor( PartitionTxn partitionTxn ) throws LdapException
+    public IndexCursor<K, O> reverseCursor() throws Exception
     {
-        return new IndexCursorAdaptor<>( partitionTxn, ( Cursor ) forward.cursor(), true );
+        return new IndexCursorAdaptor<K, O>( ( Cursor ) reverse.cursor(), false );
     }
 
 
-    public Cursor<IndexEntry<K, String>> forwardCursor( PartitionTxn partitionTxn, K key ) throws LdapException
+    @SuppressWarnings("unchecked")
+    public IndexCursor<K, O> forwardCursor() throws Exception
     {
-        return new IndexCursorAdaptor<>( partitionTxn, ( Cursor ) forward.cursor( partitionTxn, key ), true );
+        return new IndexCursorAdaptor<K, O>( ( Cursor ) forward.cursor(), true );
     }
 
 
-    /**
-     * {@inheritDoc}
-     */
-    @Override
-    public Cursor<K> reverseValueCursor( PartitionTxn partitionTxn, String id ) throws LdapException
+    @SuppressWarnings("unchecked")
+    public IndexCursor<K, O> reverseCursor( Long id ) throws Exception
     {
-        if ( withReverse )
-        {
-            return reverse.valueCursor( partitionTxn, id );
-        }
-        else
-        {
-            return new EmptyCursor<>();
-        }
+        return new IndexCursorAdaptor<K, O>( ( Cursor ) reverse.cursor( id ), false );
     }
 
 
-    public Cursor<String> forwardValueCursor( PartitionTxn partitionTxn, K key ) throws LdapException
+    @SuppressWarnings("unchecked")
+    public IndexCursor<K, O> forwardCursor( K key ) throws Exception
     {
-        return forward.valueCursor( partitionTxn, key );
+        return new IndexCursorAdaptor<K, O>( ( Cursor ) forward.cursor( key ), true );
+    }
+
+
+    public Cursor<K> reverseValueCursor( Long id ) throws Exception
+    {
+        return reverse.valueCursor( id );
+    }
+
+
+    public Cursor<Long> forwardValueCursor( K key ) throws Exception
+    {
+        return forward.valueCursor( key );
     }
 
 
     // ------------------------------------------------------------------------
     // Value Assertion (a.k.a Index Lookup) Methods //
     // ------------------------------------------------------------------------
-    /**
-     * {@inheritDoc}
-     */
-    public boolean forward( PartitionTxn partitionTxn, K attrVal ) throws LdapException
-    {
-        return forward.has( partitionTxn, attrVal );
-    }
-
-
-    /**
-     * {@inheritDoc}
-     */
-    public boolean forward( PartitionTxn partitionTxn, K attrVal, String id ) throws LdapException
-    {
-        return forward.has( partitionTxn, attrVal, id );
-    }
-
-
-    /**
-     * {@inheritDoc}
-     */
-    public boolean reverse( PartitionTxn partitionTxn, String id ) throws LdapException
-    {
-        if ( withReverse )
-        {
-            return reverse.has( partitionTxn, id );
-        }
-        else
-        {
-            return false;
-        }
-    }
-
-
-    /**
-     * {@inheritDoc}
-     */
-    public boolean reverse( PartitionTxn partitionTxn, String id, K attrVal ) throws LdapException
-    {
-        return forward.has( partitionTxn, attrVal, id );
-    }
-
-
-    // ------------------------------------------------------------------------
-    // Maintenance Methods
-    // ------------------------------------------------------------------------
-    /**
-     * {@inheritDoc}
-     */
-    @Override
-    public synchronized void close( PartitionTxn partitionTxn ) throws LdapException, IOException
-    {
-        if ( forward != null )
-        {
-            forward.close( partitionTxn );
-        }
-
-        if ( reverse != null )
-        {
-            reverse.close( partitionTxn );
-        }
-    }
 
     
     /**
-     * {@inheritDoc}
+     * @see Index#forward(Object)
      */
-    @Override
-    public boolean isDupsEnabled()
+    public boolean forward( K attrVal ) throws Exception
     {
-        if ( withReverse )
-        {
-            return reverse.isDupsEnabled();
-        }
-        else
-        {
-            return false;
-        }
+        return forward.has( getNormalized( attrVal ) );
     }
 
 
+    /**
+     * @see Index#forward(Object,Long)
+     */
+    public boolean forward( K attrVal, Long id ) throws Exception
+    {
+        return forward.has( getNormalized( attrVal ), id );
+    }
+
+    /**
+     * @see Index#reverse(Long)
+     */
+    public boolean reverse( Long id ) throws Exception
+    {
+        return reverse.has( id );
+    }
+
+
+    /**
+     * @see Index#reverse(Long,Object)
+     */
+    public boolean reverse( Long id, K attrVal ) throws Exception
+    {
+        return forward.has( getNormalized( attrVal ), id );
+    }
+
+
+    /**
+     * @see org.apache.directory.server.xdbm.Index#forwardGreaterOrEq(Object)
+     */
+    public boolean forwardGreaterOrEq( K attrVal ) throws Exception
+    {
+        return forward.hasGreaterOrEqual( getNormalized( attrVal ) );
+    }
+
+
+    /**
+     * @see org.apache.directory.server.xdbm.Index#forwardGreaterOrEq(Object, Long)
+     */
+    public boolean forwardGreaterOrEq( K attrVal, Long id ) throws Exception
+    {
+        return forward.hasGreaterOrEqual( getNormalized( attrVal ), id );
+    }
+
+
+    /**
+     * @see org.apache.directory.server.xdbm.Index#forwardLessOrEq(Object)
+     */
+    public boolean forwardLessOrEq( K attrVal ) throws Exception
+    {
+        return forward.hasLessOrEqual( getNormalized( attrVal ) );
+    }
+
+
+    /**
+     * @see org.apache.directory.server.xdbm.Index#forwardLessOrEq(Object, Long)
+     */
+    public boolean forwardLessOrEq( K attrVal, Long id ) throws Exception
+    {
+        return forward.hasLessOrEqual( getNormalized( attrVal ), id );
+    }
+
+
+    /**
+     * @see org.apache.directory.server.xdbm.Index#reverseGreaterOrEq(Long)
+     */
+    public boolean reverseGreaterOrEq( Long id ) throws Exception
+    {
+        return reverse.hasGreaterOrEqual( id );
+    }
+
+
+    /**
+     * @see org.apache.directory.server.xdbm.Index#reverseGreaterOrEq(Long,Object)
+     */
+    public boolean reverseGreaterOrEq( Long id, K attrVal ) throws Exception
+    {
+        return reverse.hasGreaterOrEqual( id, getNormalized( attrVal ) );
+    }
+
+
+    /**
+     * @see org.apache.directory.server.xdbm.Index#reverseLessOrEq(Long)
+     */
+    public boolean reverseLessOrEq( Long id ) throws Exception
+    {
+        return reverse.hasLessOrEqual( id );
+    }
+
+
+    /**
+     * @see org.apache.directory.server.xdbm.Index#reverseLessOrEq(Long,Object)
+     */
+    public boolean reverseLessOrEq( Long id, K attrVal ) throws Exception
+    {
+        return reverse.hasLessOrEqual( id, getNormalized( attrVal ) );
+    }
+
+
+    // ------------------------------------------------------------------------
+    // Maintenance Methods 
+    // ------------------------------------------------------------------------
+
+
+    /**
+     * @see org.apache.directory.server.xdbm.Index#close()
+     */
+    public synchronized void close() throws IOException
+    {
+        forward.close();
+        reverse.close();
+        recMan.commit();
+        recMan.close();
+    }
+
+
+    /**
+     * @see Index#sync()
+     */
+    public synchronized void sync() throws IOException
+    {
+        recMan.commit();
+    }
+
+
+    /**
+     * TODO I don't think the keyCache is required anymore since the normalizer
+     * will cache values for us.
+     */
+    @SuppressWarnings("unchecked")
+    public K getNormalized( K attrVal ) throws Exception
+    {
+        if ( attrVal instanceof Long )
+        {
+            return attrVal;
+        }
+
+        K normalized = ( K ) keyCache.get( attrVal );
+
+        if ( null == normalized )
+        {
+            normalized = ( K ) attribute.getEquality().getNormalizer().normalize( attrVal );
+
+            // Double map it so if we use an already normalized
+            // value we can get back the same normalized value.
+            // and not have to regenerate a second time.
+            keyCache.put( attrVal, normalized );
+            keyCache.put( normalized, normalized );
+        }
+
+        return normalized;
+    }
+    
+    
     /**
      * @see Object#toString()
      */
     public String toString()
     {
-        return "Index<" + attributeId + ">";
+        return "Index<" + attributeId +">";
     }
 }

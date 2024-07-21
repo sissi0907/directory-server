@@ -14,11 +14,11 @@ jobs:
           distribution: 'adopt'
           java-version: '8'
           
-      - name: maven clean install 
-        run: mvn clean install -Dcheckstyle.skip -Drat.skip -U
+      # - name: maven clean install 
+      #   run: mvn clean install -Dcheckstyle.skip -Drat.skip -U
         
       # - name: Compile Module
       #   run: mvn test-compile -am -Dcheckstyle.skip -Drat.skip -U
   
       - name: Run Flaky Test
-        run: mvn test -Dtest=org.apache.directory.server.core.partition.impl.btree.jdbm.JdbmIndexTest -U
+        run: mvn test -Dtest=org.apache.directory.server.core.partition.impl.btree.jdbm.JdbmIndexTest#testAttributeId

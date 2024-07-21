@@ -28,11 +28,11 @@ jobs:
   
       - name: Test with Maven 
         run: | 
-              for i in {1..100}; do mvn test -fae>> test-log_full.txt; done
+              for i in {1..100}; do mvn test -fae>>test_log.txt; done
               echo "Maven tests completed." 
       - name: Upload Test Log 
         if: always() 
         uses: actions/upload-artifact@v2 
         with: 
-          name: test-log 
+          name: test_log 
           path: test_log.txt

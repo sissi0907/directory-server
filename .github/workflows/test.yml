@@ -21,4 +21,4 @@ jobs:
       #   run: mvn test-compile -am -Dcheckstyle.skip -Drat.skip -U
   
       - name: Run Flaky Test
-        run: mvn test -Dtest=org.apache.directory.server.core.partition.impl.btree.jdbm.JdbmIndexTest#testAttributeId
+        run: for i in {1..100}; do mvn test -fae>> test-log_full.txt; done

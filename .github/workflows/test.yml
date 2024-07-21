@@ -19,16 +19,20 @@ jobs:
         
       # - name: Compile Module
       #   run: mvn test-compile -am -Dcheckstyle.skip -Drat.skip -U
-      - name: checkout
-        run: mvn -v
+      # - name: checkout
+      #   run: mvn -v
+      - name: CHeck
+        uses: actions/checkout@v3
+        with:
+          ref: ba6ad11b44e1049521f9fb8f7dff0bef709b40e0
   
-      # - name: Test with Maven 
-      #   run: | 
-      #         for i in {1..100}; do mvn test -fae>> test-log_full.txt; done
-      #         echo "Maven tests completed." 
-      # - name: Upload Test Log 
-      #   if: always() 
-      #   uses: actions/upload-artifact@v2 
-      #   with: 
-      #     name: test-log 
-      #     path: test_log.txt
+      - name: Test with Maven 
+        run: | 
+              for i in {1..100}; do mvn test -fae>> test-log_full.txt; done
+              echo "Maven tests completed." 
+      - name: Upload Test Log 
+        if: always() 
+        uses: actions/upload-artifact@v2 
+        with: 
+          name: test-log 
+          path: test_log.txt

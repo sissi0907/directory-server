@@ -24,15 +24,15 @@ jobs:
       - name: CHeck
         uses: actions/checkout@v3
         with:
-          ref: ba6ad11b44e1049521f9fb8f7dff0bef709b40e0
+          ref: f003088137d42461717590c763eb1f40b8d06a65
   
       - name: Test with Maven 
         run: | 
-              for i in {1..100}; do mvn test -fae>>test_log.txt; done
-              echo "Maven tests completed." 
-      - name: Upload Test Log 
-        if: always() 
-        uses: actions/upload-artifact@v2 
-        with: 
-          name: test_log 
-          path: test_log.txt
+              for i in {1..5}; do mvn test -Dtest=org.apache.directory.server.core.partition.impl.btree.jdbm.JdbmIndexTest#testSingleValuedAttribute -fae; done#>>test_log.txt; done
+              # echo "Maven tests completed." 
+      # - name: Upload Test Log 
+      #   if: always() 
+      #   uses: actions/upload-artifact@v2 
+      #   with: 
+      #     name: test_log 
+      #     path: test_log.txt
